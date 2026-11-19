@@ -1,0 +1,21 @@
+[project]
+name = "transcribe"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.165.0",
+    "httpx>=0.28.1",
+    "python-docx>=1.2.0",
+    "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.34",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
