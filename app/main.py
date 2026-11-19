@@ -1,21 +1,21 @@
 """Transcribe: upload a recording, get a speaker-labelled transcript.
 
-Audio goes to Deepgram's pre-recorded (batch) API with diarization on and the
-Model Improvement Program opted out, so Deepgram does not keep it for
-training. Nothing is written to disk beyond a per-request temp dir that is
-deleted when the request ends, and nothing is logged except paths and status.
+The upload is converted to 16 kHz mono FLAC and sent to the chosen provider
+(see providers.py for each one's privacy settings). Nothing is written to disk
+beyond a per-request temp dir that is deleted when the request ends, and
+nothing is logged except paths and status.
 """
 
 import asyncio
 import io
+import json
 import os
 import secrets
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 
-import httpx
 from docx import Document
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request, UploadFile
@@ -28,9 +28,10 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
+from app import providers
+
 load_dotenv()
 
-DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
 STATIC = Path(__file__).parent / "static"
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 LANGUAGES = {"en", "es", "de", "fr", "it", "pt", "nl", "ru", "multi"}
@@ -43,7 +44,10 @@ def _env(name: str) -> str:
     return value
 
 
-DEEPGRAM_API_KEY = _env("DEEPGRAM_API_KEY")
+PROVIDERS = providers.available()
+if not PROVIDERS:
+    keys = ", ".join(p.key_env for p in providers.ALL)
+    raise RuntimeError(f"Set at least one provider key ({keys}); see .env.example")
 ACCESS_TOKEN = _env("ACCESS_TOKEN")
 if len(ACCESS_TOKEN) < 20:
     raise RuntimeError("ACCESS_TOKEN must be at least 20 characters; see .env.example")
@@ -96,14 +100,6 @@ async def open_link(token: str, request: Request) -> Response:
     return response
 
 
-@dataclass
-class Segment:
-    speaker: int
-    start: float
-    end: float
-    text: str
-
-
 @app.get("/")
 async def index(request: Request) -> Response:
     if not has_access(request):
@@ -113,7 +109,14 @@ async def index(request: Request) -> Response:
 
 @api.get("/config")
 async def config() -> dict:
-    return {"default_language": DEFAULT_LANGUAGE, "max_upload_mb": MAX_UPLOAD_BYTES >> 20}
+    return {
+        "default_language": DEFAULT_LANGUAGE,
+        "max_upload_mb": MAX_UPLOAD_BYTES >> 20,
+        "providers": [
+            {"id": p.id, "label": p.label, "max_minutes": p.max_seconds and p.max_seconds // 60}
+            for p in PROVIDERS.values()
+        ],
+    }
 
 
 async def save_upload(upload: UploadFile, dest: Path) -> None:
@@ -128,93 +131,46 @@ async def save_upload(upload: UploadFile, dest: Path) -> None:
         raise HTTPException(400, "The file is empty")
 
 
-async def to_flac(src: Path, dest: Path) -> None:
-    """Any audio or video in, 16 kHz mono FLAC out: lossless for speech, ~1 MB/min."""
+async def duration_of(path: Path) -> float:
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(src),
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
-        "flac",
-        str(dest),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, err = await proc.communicate()
-    if proc.returncode != 0:
-        raise HTTPException(
-            422, "Could not read this file as audio: " + err.decode(errors="replace").strip()[-300:]
-        )
-
-
-async def call_deepgram(audio: Path, language: str) -> dict:
-    params = {
-        "model": "nova-3",
-        "language": language,
-        "diarize_model": "latest",  # v2+ speaker model; plain diarize=true pins v1
-        "utterances": "true",
-        "smart_format": "true",
-        "punctuate": "true",
-        "mip_opt_out": "true",  # do not let Deepgram keep the audio for training
-    }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(900, connect=30)) as client:
-        with audio.open("rb") as f:
-            resp = await client.post(
-                DEEPGRAM_URL,
-                params=params,
-                content=f.read(),
-                headers={
-                    "Authorization": f"Token {DEEPGRAM_API_KEY}",
-                    "Content-Type": "audio/flac",
-                },
-            )
-    if resp.status_code != 200:
-        raise HTTPException(502, f"Deepgram error {resp.status_code}: {resp.text[:300]}")
-    return resp.json()
-
-
-def to_segments(result: dict) -> list[Segment]:
-    """Deepgram utterances, with consecutive turns by the same speaker merged."""
-    segments: list[Segment] = []
-    for u in result.get("results", {}).get("utterances", []):
-        text = u.get("transcript", "").strip()
-        if not text:
-            continue
-        speaker = int(u.get("speaker", 0))
-        if segments and segments[-1].speaker == speaker:
-            segments[-1].end = u["end"]
-            segments[-1].text += " " + text
-        else:
-            segments.append(Segment(speaker, u["start"], u["end"], text))
-    return segments
+        "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )  # fmt: skip
+    out, _ = await proc.communicate()
+    return float(json.loads(out)["format"]["duration"])
 
 
 @api.post("/transcribe")
-async def transcribe(file: UploadFile, language: str = Form(DEFAULT_LANGUAGE)) -> dict:
+async def transcribe(
+    file: UploadFile,
+    language: str = Form(DEFAULT_LANGUAGE),
+    provider: str = Form(""),
+) -> dict:
     if language not in LANGUAGES:
         raise HTTPException(400, f"Unsupported language {language!r}")
+    chosen = PROVIDERS.get(provider) if provider else next(iter(PROVIDERS.values()))
+    if chosen is None:
+        raise HTTPException(400, f"Unknown or unconfigured provider {provider!r}")
     workdir = Path(tempfile.mkdtemp(prefix="transcribe-"))
     try:
         src, flac = workdir / "upload", workdir / "audio.flac"
         await save_upload(file, src)
-        await to_flac(src, flac)
+        await providers.ffmpeg(src, flac, "-c:a", "flac")
         src.unlink()
-        result = await call_deepgram(flac, language)
+        duration = await duration_of(flac)
+        if chosen.max_seconds and duration > chosen.max_seconds:
+            raise HTTPException(
+                413,
+                f"{chosen.label} handles at most {chosen.max_seconds // 60} minutes with speaker "
+                f"labels and would silently cut the rest; this recording is "
+                f"{duration / 60:.0f} minutes. Pick another model.",
+            )
+        segments = await chosen.transcribe(flac, workdir, language)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-    segments = to_segments(result)
     return {
-        "duration": result.get("metadata", {}).get("duration"),
+        "provider": chosen.label,
+        "duration": duration,
         "speakers": sorted({s.speaker for s in segments}),
         "segments": [asdict(s) for s in segments],
     }
@@ -238,7 +194,8 @@ async def docx(req: DocxRequest) -> StreamingResponse:
     for seg in req.segments:
         speaker = str(seg["speaker"])
         p = doc.add_paragraph()
-        p.add_run(f"[{timestamp(seg['start'])}] ").italic = True
+        if seg.get("start") is not None:
+            p.add_run(f"[{timestamp(seg['start'])}] ").italic = True
         p.add_run(f"{req.names.get(speaker) or 'Speaker ' + speaker}: ").bold = True
         p.add_run(seg["text"])
     buf = io.BytesIO()
