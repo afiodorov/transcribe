@@ -173,7 +173,7 @@ class OpenAI:
 
     id, label = "openai", "OpenAI GPT-4o Transcribe Diarize"
     key_env = "OPENAI_API_KEY"
-    max_seconds = None
+    max_seconds = 1400  # the API rejects longer audio for this model
     max_bytes = 25 * 1024 * 1024
     url = "https://api.openai.com/v1/audio/transcriptions"
 

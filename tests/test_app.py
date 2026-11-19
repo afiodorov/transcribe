@@ -262,7 +262,7 @@ def test_too_long_for_gemini_is_refused_before_sending(monkeypatch):
         files={"file": ("long.mp3", tone_mp3(), "audio/mpeg")},
     )
     assert r.status_code == 413
-    assert "silently cut" in r.json()["detail"]
+    assert "at most" in r.json()["detail"]
     assert not called
 
 

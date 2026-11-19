@@ -161,9 +161,8 @@ async def transcribe(
         if chosen.max_seconds and duration > chosen.max_seconds:
             raise HTTPException(
                 413,
-                f"{chosen.label} handles at most {chosen.max_seconds // 60} minutes with speaker "
-                f"labels and would silently cut the rest; this recording is "
-                f"{duration / 60:.0f} minutes. Pick another model.",
+                f"{chosen.label} accepts at most {chosen.max_seconds // 60} minutes with speaker "
+                f"labels; this recording is {duration / 60:.0f} minutes. Pick another model.",
             )
         segments = await chosen.transcribe(flac, workdir, language)
     finally:
