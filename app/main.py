@@ -124,7 +124,7 @@ async def call_deepgram(audio: Path, language: str) -> dict:
     params = {
         "model": "nova-3",
         "language": language,
-        "diarize": "true",
+        "diarize_model": "latest",  # v2+ speaker model; plain diarize=true pins v1
         "utterances": "true",
         "smart_format": "true",
         "punctuate": "true",

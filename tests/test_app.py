@@ -129,7 +129,8 @@ def test_deepgram_request_opts_out_of_training_and_diarizes(monkeypatch, tmp_pat
     asyncio.run(main.call_deepgram(audio, "en"))
     p = captured["params"]
     assert p["mip_opt_out"] == "true"
-    assert p["diarize"] == "true"
+    assert p["diarize_model"] == "latest"
+    assert "diarize" not in p
     assert p["utterances"] == "true"
     assert captured["headers"]["Authorization"] == "Token test-key"
 
