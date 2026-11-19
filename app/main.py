@@ -51,7 +51,7 @@ if not PROVIDERS:
 ACCESS_TOKEN = _env("ACCESS_TOKEN")
 if len(ACCESS_TOKEN) < 20:
     raise RuntimeError("ACCESS_TOKEN must be at least 20 characters; see .env.example")
-DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE", "en")
+DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE", "es")
 COOKIE = "access"
 COOKIE_MAX_AGE = 365 * 24 * 3600
 

@@ -1,7 +1,7 @@
 # Transcribe
 
 A small web app that turns a recording (for example a 30-minute MP3) into a
-transcript with speakers labelled. Pick a model per upload:
+transcript with speakers labelled. Pick a model per upload (default: Gemini, Spanish):
 
 | Model | Notes |
 | --- | --- |

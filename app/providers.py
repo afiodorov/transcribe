@@ -209,7 +209,7 @@ class OpenAI:
         ])  # fmt: skip
 
 
-ALL = [Deepgram(), Gemini(), OpenAI()]
+ALL = [Gemini(), Deepgram(), OpenAI()]  # first configured one is the default
 
 
 def available() -> dict:

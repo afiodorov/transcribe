@@ -225,7 +225,7 @@ def test_openai_sends_small_opus_to_the_diarize_model(fake_http, flac):
 
 def test_config_lists_configured_providers():
     ids = [p["id"] for p in authed.get("/api/config").json()["providers"]]
-    assert ids == ["deepgram", "gemini", "openai"]
+    assert ids == ["gemini", "deepgram", "openai"]
 
 
 @pytest.mark.parametrize("provider", ["deepgram", "gemini", "openai"])
@@ -312,3 +312,18 @@ def test_docx_without_timestamps_omits_them():
     r = authed.post("/api/docx", json={"title": "S", "names": {}, "segments": segs})
     paras = [p.text for p in docx.Document(io.BytesIO(r.content)).paragraphs]
     assert paras == ["S", "Speaker 0: Hola."]
+
+
+def test_defaults_are_gemini_and_spanish(monkeypatch):
+    seen = {}
+
+    async def fake(flac, workdir, language):
+        seen["language"] = language
+        return [providers.Segment(0, None, None, "Hola.")]
+
+    monkeypatch.setattr(main.PROVIDERS["gemini"], "transcribe", fake)
+    assert authed.get("/api/config").json()["default_language"] == "es"
+    r = authed.post("/api/transcribe", files={"file": ("s.mp3", tone_mp3(), "audio/mpeg")})
+    assert r.status_code == 200, r.text
+    assert r.json()["provider"] == "Gemini 3.5 Transcribe"
+    assert seen["language"] == "es"
