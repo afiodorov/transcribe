@@ -3,8 +3,8 @@ import os
 import subprocess
 
 os.environ.setdefault("DEEPGRAM_API_KEY", "test-key")
-os.environ["AUTH_USER"] = "user"
-os.environ["AUTH_PASSWORD"] = "pass"
+TOKEN = "t" * 32
+os.environ["ACCESS_TOKEN"] = TOKEN
 
 import docx  # noqa: E402
 import pytest  # noqa: E402
@@ -12,8 +12,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import main  # noqa: E402
 
-AUTH = ("user", "pass")
 client = TestClient(main.app)
+authed = TestClient(main.app, cookies={"access": TOKEN})
 
 DEEPGRAM_RESULT = {
     "metadata": {"duration": 12.5},
@@ -49,21 +49,41 @@ def tone_mp3() -> bytes:
     ).stdout
 
 
-@pytest.mark.parametrize("auth", [None, ("user", "wrong"), ("other", "pass")])
-def test_every_route_requires_auth(auth):
+@pytest.mark.parametrize("cookie", [None, "wrong", TOKEN[:-1]])
+def test_every_route_requires_the_access_cookie(cookie):
+    c = TestClient(main.app, cookies={"access": cookie} if cookie else None)
     for method, path in [
         ("get", "/"),
         ("get", "/api/config"),
         ("post", "/api/transcribe"),
         ("post", "/api/docx"),
     ]:
-        r = getattr(client, method)(path, auth=auth)
+        r = getattr(c, method)(path)
         assert r.status_code == 401, path
-        assert r.headers["www-authenticate"].startswith("Basic")
+    assert "link you were given" in c.get("/").text
+    assert "<script" not in c.get("/").text
 
 
-def test_index_served_with_auth():
-    r = client.get("/", auth=AUTH)
+def test_link_sets_a_long_lived_cookie_and_redirects_to_a_clean_url():
+    c = TestClient(main.app, base_url="https://testserver")
+    r = c.get(f"/s/{TOKEN}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+    cookie = r.headers["set-cookie"].lower()
+    for attr in ["access=" + TOKEN, "httponly", "secure", "samesite=lax", "max-age=31536000"]:
+        assert attr in cookie
+    assert c.get("/").status_code == 200, "the cookie alone must now be enough"
+    assert r.headers["referrer-policy"] == "no-referrer"
+
+
+def test_wrong_link_sets_no_cookie():
+    r = client.get("/s/" + "x" * 32, follow_redirects=False)
+    assert r.status_code == 401
+    assert "set-cookie" not in r.headers
+
+
+def test_index_served_with_cookie():
+    r = authed.get("/")
     assert r.status_code == 200
     assert "Transcribe" in r.text
 
@@ -88,9 +108,8 @@ def test_transcribe_converts_to_flac_sends_privacy_params_and_cleans_up(monkeypa
         return DEEPGRAM_RESULT
 
     monkeypatch.setattr(main, "call_deepgram", fake_deepgram)
-    r = client.post(
+    r = authed.post(
         "/api/transcribe",
-        auth=AUTH,
         data={"language": "es"},
         files={"file": ("session.mp3", tone_mp3(), "audio/mpeg")},
     )
@@ -136,9 +155,8 @@ def test_deepgram_request_opts_out_of_training_and_diarizes(monkeypatch, tmp_pat
 
 
 def test_non_audio_upload_is_rejected():
-    r = client.post(
+    r = authed.post(
         "/api/transcribe",
-        auth=AUTH,
         files={"file": ("notes.txt", b"not audio at all", "text/plain")},
     )
     assert r.status_code == 422
@@ -146,9 +164,8 @@ def test_non_audio_upload_is_rejected():
 
 
 def test_unknown_language_is_rejected():
-    r = client.post(
+    r = authed.post(
         "/api/transcribe",
-        auth=AUTH,
         data={"language": "xx"},
         files={"file": ("a.mp3", b"x", "audio/mpeg")},
     )
@@ -160,9 +177,8 @@ def test_docx_uses_speaker_names_and_timestamps():
         {"speaker": 0, "start": 65, "end": 70, "text": "Hello."},
         {"speaker": 1, "start": 3725, "end": 3730, "text": "Hi."},
     ]
-    r = client.post(
+    r = authed.post(
         "/api/docx",
-        auth=AUTH,
         json={"title": "Session", "names": {"0": "Therapist"}, "segments": segs},
     )
     assert r.status_code == 200

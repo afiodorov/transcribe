@@ -18,9 +18,14 @@ from pathlib import Path
 import httpx
 from docx import Document
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from pydantic import BaseModel
 
 load_dotenv()
@@ -39,26 +44,56 @@ def _env(name: str) -> str:
 
 
 DEEPGRAM_API_KEY = _env("DEEPGRAM_API_KEY")
-AUTH_USER = _env("AUTH_USER")
-AUTH_PASSWORD = _env("AUTH_PASSWORD")
+ACCESS_TOKEN = _env("ACCESS_TOKEN")
+if len(ACCESS_TOKEN) < 20:
+    raise RuntimeError("ACCESS_TOKEN must be at least 20 characters; see .env.example")
 DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE", "en")
+COOKIE = "access"
+COOKIE_MAX_AGE = 365 * 24 * 3600
 
-basic = HTTPBasic(realm="transcribe")
-
-
-async def require_auth(creds: HTTPBasicCredentials = Depends(basic)) -> None:
-    ok_user = secrets.compare_digest(creds.username.encode(), AUTH_USER.encode())
-    ok_pass = secrets.compare_digest(creds.password.encode(), AUTH_PASSWORD.encode())
-    if not (ok_user and ok_pass):
-        await asyncio.sleep(1)  # slow down password guessing
-        raise HTTPException(
-            401,
-            "Wrong username or password",
-            headers={"WWW-Authenticate": 'Basic realm="transcribe"'},
-        )
+NO_ACCESS_PAGE = """<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Transcribe</title>
+<body style="font:16px system-ui,sans-serif;max-width:560px;margin:15vh auto;padding:0 16px">
+<h1>Transcribe</h1><p>This page is private. Open it with the link you were given.</p></body>"""
 
 
-app = FastAPI(dependencies=[Depends(require_auth)], docs_url=None, redoc_url=None, openapi_url=None)
+def has_access(request: Request) -> bool:
+    cookie = request.cookies.get(COOKIE, "")
+    return secrets.compare_digest(cookie.encode(), ACCESS_TOKEN.encode())
+
+
+async def require_access(request: Request) -> None:
+    if not has_access(request):
+        raise HTTPException(401, "This page is private. Open it with the link you were given.")
+
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+api = APIRouter(prefix="/api", dependencies=[Depends(require_access)])
+
+
+@app.middleware("http")
+async def no_referrer(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@app.get("/s/{token}")
+async def open_link(token: str, request: Request) -> Response:
+    """The shareable link: swap the token for a cookie, then drop it from the URL."""
+    if not secrets.compare_digest(token.encode(), ACCESS_TOKEN.encode()):
+        await asyncio.sleep(1)  # slow down guessing
+        return HTMLResponse(NO_ACCESS_PAGE, status_code=401)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        COOKIE,
+        ACCESS_TOKEN,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+    )
+    return response
 
 
 @dataclass
@@ -70,11 +105,13 @@ class Segment:
 
 
 @app.get("/")
-async def index() -> FileResponse:
+async def index(request: Request) -> Response:
+    if not has_access(request):
+        return HTMLResponse(NO_ACCESS_PAGE, status_code=401)
     return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/config")
+@api.get("/config")
 async def config() -> dict:
     return {"default_language": DEFAULT_LANGUAGE, "max_upload_mb": MAX_UPLOAD_BYTES >> 20}
 
@@ -162,7 +199,7 @@ def to_segments(result: dict) -> list[Segment]:
     return segments
 
 
-@app.post("/api/transcribe")
+@api.post("/transcribe")
 async def transcribe(file: UploadFile, language: str = Form(DEFAULT_LANGUAGE)) -> dict:
     if language not in LANGUAGES:
         raise HTTPException(400, f"Unsupported language {language!r}")
@@ -194,7 +231,7 @@ def timestamp(seconds: float) -> str:
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
-@app.post("/api/docx")
+@api.post("/docx")
 async def docx(req: DocxRequest) -> StreamingResponse:
     doc = Document()
     doc.add_heading(req.title or "Transcript", level=1)
@@ -212,3 +249,6 @@ async def docx(req: DocxRequest) -> StreamingResponse:
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": 'attachment; filename="transcript.docx"'},
     )
+
+
+app.include_router(api)

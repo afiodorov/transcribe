@@ -1,4 +1,4 @@
-.PHONY: install run test lint docker
+.PHONY: install run test lint docker link
 
 install:
 	uv sync
@@ -14,3 +14,6 @@ lint:
 
 docker:
 	docker build -t transcribe . && docker run --rm -p 127.0.0.1:8000:8000 --env-file .env transcribe
+
+link:
+	@. ./.env && echo "$$PUBLIC_URL/s/$$ACCESS_TOKEN"
