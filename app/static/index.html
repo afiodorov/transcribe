@@ -136,7 +136,9 @@ $("form").addEventListener("submit", (e) => {
     data = xhr.response;
     if (!data.segments.length) { setStatus("No speech was found in this recording.", true); return; }
     const mins = data.duration ? Math.round(data.duration / 60) : "?";
-    setStatus(`Done with ${data.provider}: ${mins} min, ${data.speakers.length} speaker(s). Rename the speakers below, then download.`);
+    const parts = data.chunks > 1 ? ` in ${data.chunks} parts` : "";
+    setStatus(`Done with ${data.provider}${parts}: ${mins} min, ${data.speakers.length} speaker(s). Rename the speakers below, then download.`
+      + (data.warnings.length ? " Note: " + data.warnings.join(" ") : ""), data.warnings.length > 0);
     render();
   };
   xhr.onerror = () => { $("go").disabled = false; $("progress").hidden = true;

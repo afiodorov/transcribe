@@ -252,18 +252,21 @@ def test_transcribe_routes_to_the_chosen_provider_and_cleans_up(monkeypatch, pro
     assert not seen["dir"].exists(), "temp dir with the audio must be deleted"
 
 
-def test_too_long_for_gemini_is_refused_before_sending(monkeypatch):
-    called = []
-    monkeypatch.setattr(main.PROVIDERS["gemini"], "max_seconds", 1)
-    monkeypatch.setattr(main.PROVIDERS["gemini"], "transcribe", lambda *a: called.append(a))
-    r = authed.post(
-        "/api/transcribe",
-        data={"provider": "gemini"},
-        files={"file": ("long.mp3", tone_mp3(), "audio/mpeg")},
-    )
-    assert r.status_code == 413
-    assert "at most" in r.json()["detail"]
-    assert not called
+def test_long_recordings_are_cut_into_chunks_within_the_limit(monkeypatch):
+    lengths = []
+
+    async def fake(flac, workdir, language):
+        lengths.append(await main.duration_of(flac))
+        return [providers.Segment(0, None, None, f"part{len(lengths)}")]
+
+    monkeypatch.setenv("CHUNK_SECONDS", "1")
+    monkeypatch.setattr(main.PROVIDERS["gemini"], "transcribe", fake)
+    r = authed.post("/api/transcribe", files={"file": ("s.mp3", tone_mp3(), "audio/mpeg")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["chunks"] == len(lengths) == 3
+    assert all(n <= 1.05 for n in lengths), lengths
+    assert body["warnings"], "fake chunks share no words, so the join must be flagged"
 
 
 def test_unknown_provider_is_rejected():

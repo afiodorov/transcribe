@@ -13,7 +13,7 @@ import os
 import secrets
 import shutil
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from docx import Document
@@ -28,7 +28,7 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
-from app import providers
+from app import providers, stitch
 
 load_dotenv()
 
@@ -158,21 +158,52 @@ async def transcribe(
         await providers.ffmpeg(src, flac, "-c:a", "flac")
         src.unlink()
         duration = await duration_of(flac)
-        if chosen.max_seconds and duration > chosen.max_seconds:
-            raise HTTPException(
-                413,
-                f"{chosen.label} accepts at most {chosen.max_seconds // 60} minutes with speaker "
-                f"labels; this recording is {duration / 60:.0f} minutes. Pick another model.",
-            )
-        segments = await chosen.transcribe(flac, workdir, language)
+        result = await transcribe_in_chunks(chosen, flac, workdir, duration, language)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     return {
         "provider": chosen.label,
         "duration": duration,
-        "speakers": sorted({s.speaker for s in segments}),
-        "segments": [asdict(s) for s in segments],
+        "chunks": result.chunks,
+        "warnings": result.warnings,
+        "speakers": sorted({s.speaker for s in result.segments}),
+        "segments": [asdict(s) for s in result.segments],
     }
+
+
+@dataclass
+class Result:
+    segments: list[providers.Segment]
+    warnings: list[str]
+    chunks: int
+
+
+def chunk_seconds(provider) -> float | None:
+    """CHUNK_SECONDS overrides every model's limit (handy for testing the stitching
+    on short clips); otherwise chunk only models with a limit, with 30 s spare."""
+    if override := os.environ.get("CHUNK_SECONDS"):
+        return float(override)
+    return provider.max_seconds - 30 if provider.max_seconds else None
+
+
+async def transcribe_in_chunks(provider, flac: Path, workdir: Path, duration: float,
+                               language: str) -> Result:  # fmt: skip
+    max_len = chunk_seconds(provider)
+    if not max_len or duration <= max_len:
+        return Result(await provider.transcribe(flac, workdir, language), [], 1)
+
+    async def one(i: int, chunk: stitch.Chunk) -> list[providers.Segment]:
+        sub = workdir / f"chunk{i}"
+        sub.mkdir()
+        part = sub / "audio.flac"
+        await providers.ffmpeg(flac, part, "-ss", f"{chunk.start:.3f}", "-t", f"{chunk.length:.3f}",
+                               "-c:a", "flac")  # fmt: skip
+        return await provider.transcribe(part, sub, language)
+
+    chunks = stitch.plan(duration, max_len)
+    results = await asyncio.gather(*(one(i, c) for i, c in enumerate(chunks)))
+    joined = stitch.stitch(list(zip(chunks, results, strict=True)))
+    return Result(joined.segments, joined.warnings, len(chunks))
 
 
 class DocxRequest(BaseModel):
